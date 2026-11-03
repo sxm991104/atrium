@@ -110,6 +110,16 @@ class Atrium:
         self._llm = None
         self._build_front()
 
+        # 进度监工：派出去的活跑完了，主动报到
+        self.watch = None
+        if self.engine is not None:
+            try:
+                from atrium.core.watch import Watch  # noqa: PLC0415
+
+                self.watch = Watch(self, self.engine)
+            except Exception as e:  # noqa: BLE001
+                print(f"[atrium] 监工起不来：{e}", file=sys.stderr)
+
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -210,26 +220,25 @@ class Atrium:
 
 
     def _make_platform(self, name: str, pcfg: dict) -> Platform | None:
-        """按配置造一个平台。"""
-        if name == "feishu":
-            from atrium.platforms.feishu import Feishu
+        """按名字造一个平台。
 
-            try:
-                return Feishu(
-                    pcfg.get("app_id") or "",
-                    pcfg.get("app_secret") or "",
-                    verify_ssl=bool(pcfg.get("verify_ssl", True)),
-                )
-            except PlatformError as e:
-                print(f"[atrium] 飞书没起来：{e}", file=sys.stderr)
-                return None
+        ⚠️ 这里不认识任何具体平台。
+           平台自己往 registry 里登记（见 platforms/registry.py）。
 
-        print(f"[atrium] 不认识的平台：{name}", file=sys.stderr)
-        return None
+           加一个平台 = 加一个文件 + 在 platforms/__init__.py 里导入一行。
+           不用改这里。
+        """
+        from atrium.platforms import registry  # noqa: PLC0415
 
-    # ══════════════════════════════════════════════════
-    # 启动 / 停止
-    # ══════════════════════════════════════════════════
+        p = registry.make_platform(name, pcfg)
+        if p is None:
+            print(
+                f"[atrium] 没有这个平台：{name}"
+                f"（已支持：{', '.join(registry.names())}）",
+                file=sys.stderr,
+            )
+        return p
+
 
     def start(self) -> None:
         """起所有线程。"""
@@ -255,6 +264,11 @@ class Atrium:
         t3.start()
         self._threads.append(t3)
 
+        # 进度监工
+        if self.watch is not None:
+            self.watch.start()
+            print("[atrium] 进度监工已启动", flush=True)
+
     def _run_platform(self, p: Platform) -> None:
         """跑一个平台的接收循环。"""
         def on_msg(msg: Message) -> None:
@@ -274,6 +288,11 @@ class Atrium:
 
     def stop(self) -> None:
         self._stop.set()
+        if self.watch is not None:
+            try:
+                self.watch.stop()
+            except Exception:  # noqa: BLE001
+                pass
         for p in self.platforms.values():
             try:
                 p.stop()
@@ -363,14 +382,82 @@ class Atrium:
 
         # ── 有前台：让它想 ──
         if self._front is not None:
+            # ⚠️ 带上这个会话的历史。
+            #
+            #    不带的话，用户说「看看进度」，
+            #    前台根本不知道"刚才派了什么"，
+            #    只能去 task_list 列全部 20 个任务 ——
+            #    用户看到一堆老任务，懵。
+            #
+            #    实测（2026-11-04）：就是这个情况。
             try:
-                answer = self._front.reply(text)
+                from atrium.agent import memory as _mem
+
+                hist = _mem.shared().history(msg.platform, msg.channel)
+            except Exception:  # noqa: BLE001
+                hist = []
+
+            # ⚠️ 清空上一轮的"派了什么"。
+            #    前台每轮可能派 0 个或多个任务，要按轮算。
+            try:
+                from atrium.agent import tools as _ftools
+
+                _ftools.take_dispatched()
+            except Exception:  # noqa: BLE001
+                pass
+
+            try:
+                answer = self._front.reply(text, history=hist)
             except Exception as e:  # noqa: BLE001
+                import traceback
+
+                traceback.print_exc()
                 print(f"[atrium] 前台出错：{type(e).__name__}: {e}",
                       file=sys.stderr)
                 answer = f"我这边出错了：{type(e).__name__}"
 
             if answer:
+                # 记进历史，下一轮能接上
+                try:
+                    from atrium.agent import memory as _mem
+
+                    _mem.shared().add_user(msg.platform, msg.channel, text)
+                    _mem.shared().add_assistant(
+                        msg.platform, msg.channel, answer
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+                # ⚠️ 调试：把原话存下来，看清换行到底在不在。
+                #
+                #    用户在钉钉里看到表格挤成一行，
+                #    但看不出是"模型没给换行"还是"发送时吃了换行"。
+                try:
+                    import time as _t
+
+                    with open(r"D:\Project\atrium\_reply_dump.log", "a",
+                              encoding="utf-8") as _f:
+                        _f.write(
+                            f"\n===== {_t.strftime('%H:%M:%S')} =====\n"
+                            f"{answer!r}\n"
+                        )
+                except OSError:
+                    pass
+
+                # ⚠️ 把这一轮派出去的任务登记给监工。
+                #    跑完了它主动报到。
+                try:
+                    from atrium.agent import tools as _ftools
+
+                    dispatched = _ftools.take_dispatched()
+                    if dispatched and self.watch is not None:
+                        for tid in dispatched:
+                            self.watch.watch(tid, msg)
+                        print(f"[atrium] 盯上了 {len(dispatched)} 个任务："
+                              f"{dispatched}", flush=True)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[atrium] 登记监工失败：{e}", file=sys.stderr)
+
                 self.bus.push_reply(Reply.to(msg, answer))
                 self.bus.mark_done(msg.to_dict(), "前台答复")
             else:
@@ -413,6 +500,12 @@ class Atrium:
                 replies = []
 
             for r in replies:
+                # ⚠️ 调试：看 attachments 到底有没有穿过 outbox。
+                print(f"[_SENDER_DBG] 取到 reply attachments={r.attachments} "
+                      f"meta_keys={list((r.meta or {}).keys())} "
+                      f"hook={(r.meta or {}).get('session_webhook', '')[:50]!r}",
+                      flush=True)
+
                 p = self.platforms.get(r.platform)
                 if p is None:
                     print(f"[atrium] 没有平台 {r.platform}，丢弃", file=sys.stderr)
@@ -433,6 +526,28 @@ class Atrium:
 
                 if ok:
                     print(f"[atrium] 发出 {r.text[:30]!r}", flush=True)
+
+                    # ⚠️ 附件单独发。
+                    #    文字部分是"告诉你有文件"，
+                    #    这一步才是"把文件给你"。
+                    if r.attachments:
+                        print(f"[SEND_FILE_DEBUG] 有附件，准备发 "
+                              f"platform={r.platform} "
+                              f"has_send_file={hasattr(p, 'send_file')}",
+                              flush=True)
+                        sendf = getattr(p, "send_file", None)
+                        if callable(sendf):
+                            try:
+                                res = sendf(r)
+                                print(f"[SEND_FILE_DEBUG] send_file 返回 {res}",
+                                      flush=True)
+                            except Exception as e:  # noqa: BLE001
+                                print(f"[atrium] 发附件失败："
+                                      f"{type(e).__name__}: {e}",
+                                      file=sys.stderr)
+                        else:
+                            print(f"[atrium] {r.platform} 不支持发文件",
+                                  file=sys.stderr)
                 else:
                     print(f"[atrium] 三次都发不出去：{r.text[:30]!r}",
                           file=sys.stderr)

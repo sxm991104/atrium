@@ -408,11 +408,20 @@ def _run_executor(sid: str, sess: Session, task: str) -> dict:
         if status in ("ok", "done", "success"):
             result = str(st.get("result") or "").strip()
             _chunk(sid, result or "（跑完了，但没有输出）")
+
+            # ⚠️ 顺手推一条。
+            #    ACP 这一轮结束后就没机会说话了，
+            #    要用扣子的触发器把结果主动送到用户面前。
+            _push_done(task_id, task, result, ok=True)
+
             return {"stopReason": "end_turn"}
 
         if status in ("error", "failed", "fail"):
             err = str(st.get("error") or "").strip()
             _chunk(sid, f"跑失败了：{err or '没有错误信息'}")
+
+            _push_done(task_id, task, err, ok=False)
+
             return {"stopReason": "end_turn"}
 
         if status in ("cancelled", "canceled"):
@@ -435,6 +444,49 @@ def _run_executor(sid: str, sess: Session, task: str) -> dict:
 # ══════════════════════════════════════════════════════
 # 前台实例（懒加载，整个进程一份）
 # ══════════════════════════════════════════════════════
+
+def _push_done(task_id: str, task: str, result: str, ok: bool) -> None:
+    """任务跑完了，主动推一条。
+
+    ⚠️ **失败也不影响主流程**。
+       推送是锦上添花，推不出去不能让用户的这一轮变坏。
+
+    ⚠️ 为什么单独起线程：
+       推送要发 HTTP，可能几秒。
+       卡在这里会让 ACP 那一轮迟迟不回。
+
+    ⚠️ 为什么回 ACP 的同时还推：
+       两条路并行。
+           · 客户端（扣子的 Agent）会拿到结果
+           · 用户那边也会收到一条主动消息
+       重复一点没关系，总比漏了强。
+    """
+    import threading as _th
+
+    def _run() -> None:
+        try:
+            from atrium.core.app import load_config
+            from atrium.core.push import PushError, push
+
+            cfg = load_config()
+            pcfg = cfg.get("push") or {}
+            if not (pcfg.get("webhook") or "").strip():
+                return      # 没配，静默跳过
+
+            head = f"「{task_id}」" + ("跑完了" if ok else "失败了")
+            body = (result or "").strip()
+            if len(body) > 800:
+                body = body[:800] + "…"
+
+            text = f"{head}：\n{body}" if body else head
+            push(pcfg, text, extra={"task_id": task_id, "ok": ok})
+            print(f"[atrium-acp] 推送成功 {task_id}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"[atrium-acp] 推送失败 {task_id}：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+
+    _th.Thread(target=_run, daemon=True).start()
+
 
 _engine = None
 

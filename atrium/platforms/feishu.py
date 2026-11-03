@@ -38,6 +38,17 @@ from typing import Callable
 
 from atrium.core.message import Message, Reply
 from atrium.platforms.base import Platform, PlatformError
+from atrium.platforms.registry import register
+
+
+@register("feishu")
+def _make(cfg: dict) -> Platform:
+    """按配置造一个飞书平台。"""
+    return Feishu(
+        cfg.get("app_id") or "",
+        cfg.get("app_secret") or "",
+        verify_ssl=bool(cfg.get("verify_ssl", True)),
+    )
 
 
 class Feishu(Platform):

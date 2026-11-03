@@ -188,6 +188,9 @@ def dispatch_task(engine: Engine, task: str = "", task_name: str = "",
 
     task_id = res.get("id") or name or ""
 
+    # 记一笔，主程序要拿这个去盯进度
+    _remember(task_id)
+
     started = _spawn_worker(engine, task_id)
 
     tail = (
@@ -201,6 +204,142 @@ def dispatch_task(engine: Engine, task: str = "", task_name: str = "",
         f"任务：{task[:80]}\n"
         f"{tail}"
     )
+
+
+# ══════════════════════════════════════════════════════
+# 记录：这一轮派出了哪些任务
+# ══════════════════════════════════════════════════════
+#
+# ⚠️ 为什么要有这个。
+#
+#    前台调 dispatch_task 派活，但它只是"返回一段文字"。
+#    主程序（app.py）拿到的只是"前台说的话"，
+#    不知道背后派了哪些任务 —— 也就没法盯着它们跑完。
+#
+#    实测（2026-11-04）：
+#        用户派了 10 个任务，前台说"都派出去了"，
+#        但没人知道是哪 10 个，跑完了也推不回来。
+#
+#    所以这里记一笔。主程序每轮开始前清空，轮结束读走。
+
+_DISPATCHED: list[str] = []
+
+
+def take_dispatched() -> list[str]:
+    """取走这一轮派出的任务名，并清空。"""
+    global _DISPATCHED
+
+    out = list(_DISPATCHED)
+    _DISPATCHED = []
+    return out
+
+
+def _remember(task_id: str) -> None:
+    if task_id and task_id not in _DISPATCHED:
+        _DISPATCHED.append(task_id)
+
+
+def _profile_name(pid: str) -> str:
+    """把模型内部 id 转成人看的名字。
+
+    ⚠️ 为什么要转：
+        remote-dispatch 的 profile 有两种形态：
+            "p1793460955495"   内部 id（用户看不懂）
+            "deepseek"         名字
+
+        实测（2026-11-04）：
+            表格里出现 p1793460955495，用户问"这是啥"。
+    """
+    pid = (pid or "").strip()
+    if not pid:
+        return ""
+
+    # 不是内部 id 就直接用
+    if not (pid.startswith("p") and pid[1:].isdigit()):
+        return pid[0].upper() + pid[1:] if pid.isascii() else pid
+
+    try:
+        import json as _json
+        import os as _os
+
+        cfg = _os.path.join(
+            _os.environ.get("APPDATA") or "", "dsh-bridge", "engine.json"
+        )
+        with open(cfg, encoding="utf-8") as f:
+            d = _json.load(f)
+
+        items = d.get("profiles") or []
+        if isinstance(items, dict):
+            items = list(items.values())
+
+        for x in items:
+            if isinstance(x, dict) and x.get("id") == pid:
+                name = str(x.get("name") or "").strip()
+                if name:
+                    return name
+    except (OSError, ValueError):
+        pass
+
+    return "默认"
+
+
+def _scan_outputs(session_id: str, limit: int = 8) -> list[str]:
+    """扫工作目录里产出的文件。
+
+    ## 为什么要这个
+
+        引擎的 result 是**一段自然语言**：
+            "已在你当前的工作区建好 .text 文件..."
+
+        用户想知道"到底产出了什么"，
+        光看文字不够 —— 要到盘上看。
+
+    ## 扫什么
+
+        工作目录下**最新的几个文件**（按修改时间倒序）。
+
+        ⚠️ 跳过隐藏文件、__pycache__ 之类。
+           那些不是"产出"。
+
+    ## 返回
+
+        文件名的列表，最多 limit 个。
+        目录里的东西不算 —— 用户关心的是文件。
+    """
+    import os as _os
+
+    if not session_id:
+        return []
+
+    try:
+        if not _os.path.isdir(session_id):
+            return []
+
+        rows = []
+        for name in _os.listdir(session_id):
+            if name.startswith(".") or name == "__pycache__":
+                continue
+            full = _os.path.join(session_id, name)
+            try:
+                st = _os.stat(full)
+            except OSError:
+                continue
+            if not _os.path.isfile(full):
+                continue
+            rows.append((st.st_mtime, name, st.st_size))
+
+        rows.sort(reverse=True)
+        out = []
+        for _mt, name, size in rows[:limit]:
+            if size < 1024:
+                out.append(f"{name} ({size}B)")
+            elif size < 1024 * 1024:
+                out.append(f"{name} ({size // 1024}KB)")
+            else:
+                out.append(f"{name} ({size // 1024 // 1024}MB)")
+        return out
+    except OSError:
+        return []
 
 
 def task_stats(engine: Engine, name: str = "") -> str:
@@ -226,11 +365,36 @@ def task_stats(engine: Engine, name: str = "") -> str:
     err = (r.get("error") or "").strip()
     turns = r.get("turns") or 0
     task_text = (r.get("task") or "").strip()
+    profile = (r.get("profile") or "").strip()
+    session_id = (r.get("session_id") or "").strip()
+    secs = r.get("seconds")
 
-    lines = [f"「{name}」：{st}"]
+    # ⚠️ 把结构化的字段都摆出来。
+    #
+    #    以前只给一行 "「名字」：状态"，
+    #    用户想知道"用哪个模型跑的""产出什么文件"都看不到。
+    #
+    #    实测（2026-11-04）：用户要求"按模型分组，列任务名和产出"，
+    #    那时候这些字段都没暴露出来。
+    lines = [f"任务名：{name}"]
 
+    if profile:
+        lines.append(f"模型：{_profile_name(profile)}")
+    lines.append(f"状态：{st}")
     if task_text:
-        lines.append(f"任务：{task_text[:100]}")
+        lines.append(f"内容：{task_text[:100]}")
+    if secs is not None:
+        try:
+            lines.append(f"耗时：{float(secs):.1f} 秒")
+        except (TypeError, ValueError):
+            pass
+
+    # 产出文件
+    outs = _scan_outputs(session_id)
+    if outs:
+        lines.append(f"产出文件（{len(outs)} 个）：")
+        for o in outs:
+            lines.append(f"  · {o}")
 
     # 在跑的，试试拿更细的进度
     if st in ("running", "pending"):
