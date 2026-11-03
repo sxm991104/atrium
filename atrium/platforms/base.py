@@ -2,14 +2,14 @@
 
 ## 为什么要有这层
 
-    总线不认识飞书、扣子、QQ。
+    总线不认识飞书、钉钉。
     它只认识 `Platform` 这个接口。
 
     加一个平台 = 写一个类，实现四个方法。
 
 ## ⚠️ 为什么 start 要能一直阻塞
 
-    飞书用 WebSocket 收消息，扣子也是。
+    飞书和钉钉都是用 WebSocket 长连接收消息。
     它们都是"连上之后一直挂着"。
 
     start() 的设计是：
@@ -46,7 +46,7 @@ class PlatformError(Exception):
 class Platform(ABC):
     """所有平台的父类。"""
 
-    #: 平台名（feishu / coze / qq / ...）
+    #: 平台名（feishu / dingtalk / ...）
     name: str = ""
 
     def __init__(self) -> None:

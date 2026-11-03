@@ -6,3 +6,7 @@ venv/
 *.egg-info/
 dist/
 build/
+_tmp/
+atrium.log
+atrium.err.log
+_reply_dump.log

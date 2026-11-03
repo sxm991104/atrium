@@ -19,4 +19,4 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

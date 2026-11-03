@@ -1,25 +1,27 @@
 # atrium
 
-**所有平台的门，都开到这儿。**
+**所有聊天平台的门，都开到这儿。**
+
+v1.0.0
 
 ---
 
 ## 这是什么
 
-用户可以在任何地方跟自己的电脑说话：
+用户可以在任何聊天软件里跟自己的电脑说话：
 
 ```
-QQ      飞书     扣子     豆包     WorkBuddy
-  │        │        │        │          │
-  └────────┴────────┴────────┴──────────┘
-                    │
-              ┌─────▼─────┐
-              │  atrium   │   ← 这个
-              └─────┬─────┘
-                    │
-              ┌─────▼─────┐
-              │  engine   │   真正干活的地方
-              └───────────┘
+飞书      钉钉      其它聊天平台
+  │        │            │
+  └────────┴────────────┘
+              │
+        ┌─────▼─────┐
+        │  atrium   │   ← 这个
+        └─────┬─────┘
+              │
+        ┌─────▼─────┐
+        │  engine   │   真正干活的地方
+        └───────────┘
 ```
 
 **atrium 只做一件事：把消息从平台搬到引擎，再把结果搬回去。**
@@ -28,97 +30,92 @@ QQ      飞书     扣子     豆包     WorkBuddy
 
 ---
 
-## 为什么要自己写
+## 为什么自己写
 
 现在能用的东西都是一段一段拼起来的：
 
-| 环节 | 现在用的 | 问题 |
+| 环节 | 原来用的 | 问题 |
 |---|---|---|
-| QQ | AstrBot + NapCat | 别人的，重，配置复杂 |
-| 飞书 | AstrBot 插件 | 同上 |
-| 扣子 | coze-bridge | 别人的，压缩代码，改不了 |
-| 主动推送 | 无 | 扣子的桥不支持 |
+| 飞书 | AstrBot 插件 | 别人的，重，配置复杂 |
+| 钉钉 | 无 | 要自己实现 |
+| 主动推送 | 无 | 各家的桥都不给 |
 
-**三个桥，三套配置，三种行为。**
+而且都写着别人的名字 —— 出问题不知道找谁，要加功能得求人。
 
-而且都写着别人的名字 —— 出问题了不知道找谁，要加功能得求人。
+atrium 把这些收进来，一套配置、一个进程、一种行为。
 
-atrium 把这些全收进来，一套配置、一个进程、一种行为。
+---
+
+## 两个关键的设计决定
+
+### 一、异步，不是同步
+
+```
+统一的同步做法（ACP / 一问一答）：
+
+    用户说 → 引擎跑（可能两分钟）→ 才回
+        ↓
+    平台早就超时了，用户看到"发送失败"
+        ↓
+    而且跑一个任务就占住一个会话，多任务没法并发
+
+atrium 的做法：
+
+    用户说 → **立刻回"派下去了"** → 引擎后台跑
+                ↓
+          跑完 → **主动推结果回来**
+```
+
+**这就是为什么不做 ACP** —— 它是同步的，跟我们要的正好相反。
+
+### 二、先落盘，再处理
+
+```
+收到消息 → 写盘 → 回"收到" → 后台慢慢处理
+    ↓
+平台 3 秒超时不关心了，因为我们已经应答
+    ↓
+进程崩了也不丢消息，重启接着处理
+```
 
 ---
 
 ## 支持什么
 
-### 平台（收消息 / 发消息）
+### 平台
 
-| 平台 | 协议 | 状态 |
-|---|---|---|
-| 飞书 | 开放平台 API（官方） | 第一个做 |
-| 扣子 | Frontier WebSocket | 逆向过了，能做 |
-| QQ | 官方机器人 API | 待定 |
-| MCP 客户端 | MCP | 待定 |
+| 平台 | 状态 | 收消息 | 发消息 | 发文件 |
+|---|---|---|---|---|
+| **钉钉** | ✅ | Stream 长连接 | sessionWebhook | OAPI 上传 |
+| **飞书** | ✅ | lark-oapi 长连接 | HTTP API | 待做 |
 
-### 对外协议（能被谁接）
+**只接纯聊天平台。**
 
-| 协议 | 谁用 |
-|---|---|
-| MCP | Claude、Cursor、WorkBuddy、大多数 IDE |
-| ACP | Zed、Obsidian、Neovim、JetBrains |
-| OpenAI 兼容 | 任何能配 base_url 的客户端 |
+AI 平台（扣子、WorkBuddy、豆包）自带桥和 Agent，不走这儿。
+它们自己能主动发消息，我们没必要在中间再插一层 ——
+插进去还得多花一份模型钱。
 
----
+### 加一个平台
 
-## 设计原则
+```python
+# atrium/platforms/dingtalk.py
 
-### 一、适配器和引擎分开
+@register("dingtalk")
+def _make(cfg: dict) -> Platform:
+    return DingTalk(cfg["client_id"], cfg["client_secret"])
 
-```
-platforms/feishu.py      只管飞书收发的字节
-platforms/coze.py        只管扣子的 WebSocket
-platforms/qq.py          只管 QQ
 
-engine                    只认一种内部消息格式
-```
+class DingTalk(Platform):
+    name = "dingtalk"
 
-**加一个平台 = 加一个文件，不动别处。**
-
-### 二、引擎是可替换的
-
-atrium 不假设后面是什么：
-
-```
-现在的 remote-dispatch   一个 Python 进程
-将来换个更好的          只改一个适配器
+    def start(self, on_message):        # 连上，阻塞收消息
+    def send(self, reply) -> bool:      # 发文字
+    def send_file(self, reply) -> bool: # 发文件（可选）
 ```
 
-### 三、消息先落盘，再处理
+然后在 `atrium/platforms/__init__.py` 里导入一行。
 
-```
-收到消息
-    ↓
-写进 inbox（先落盘）
-    ↓
-确认收到（回平台"我收到了"）
-    ↓
-异步处理
-    ↓
-结果写进 outbox
-    ↓
-推送回原平台
-```
-
-**为什么：**平台会超时。如果同步等引擎跑完再回，用户看到的是"发送失败"。
-
-**先确认，再干活** —— 这是所有靠谱 IM 系统的做法。
-
-### 四、一个平台挂了不影响别的
-
-```
-飞书挂了     QQ 照跑
-扣子断线     飞书照跑
-    ↓
-各自的重连、各自的队列
-```
+**主程序不用改。**
 
 ---
 
@@ -126,56 +123,62 @@ atrium 不假设后面是什么：
 
 ```
 atrium/
+    cli.py              命令行：init / run / status / test
+
     core/
         message.py      内部消息格式（所有平台的公共语言）
-        bus.py          收发总线
-        queue.py        落盘的收发队列
+        queue.py        落盘队列（inbox / outbox / done / failed）
+        digest.py       批量汇总：一个任务用列表，多个用表格
+        watch.py        进度监工：盯任务，跑完一批主动报
+        app.py          主程序：串平台、队列、引擎、前台
 
-    platforms/
-        base.py         平台接口（所有平台实现它）
-        feishu.py       飞书
-        coze.py         扣子
-        qq.py           QQ
-
-    protocols/
-        mcp.py          MCP Server
-        acp.py          ACP Agent
-        openai.py       OpenAI 兼容接口
+    agent/
+        front.py        前台 Agent（接模型，会调工具）
+        prompt.py       派活手册（哪些话能派、任务名怎么起）
+        tools.py        dispatch_task / task_stats / task_list / task_cancel
+        memory.py       对话记忆（记得刚才派了什么）
 
     engine/
-        client.py       调后面那个引擎的客户端
+        client.py       引擎适配器（现在接 remote-dispatch）
 
-    cli.py              启动、状态、配置
+    platforms/
+        base.py         平台接口
+        registry.py     平台注册表
+        feishu.py       飞书
+        dingtalk.py     钉钉
+        dingtalk_file.py  钉钉发文件
 ```
 
 ---
 
 ## 内部消息格式
 
-所有平台的消息，先转成这个：
+所有平台的消息，先转成一个样子：
 
 ```python
 {
     "id": "本地唯一 id",
-    "platform": "feishu",           # 从哪来
-    "channel": "ou_xxx",            # 哪个会话（平台原样）
-    "sender": "ou_xxx",             # 谁发的
-    "text": "帮我看看那个文件",       # 说的话
-    "attachments": [],              # 附件
-    "reply_to": "",                 # 回哪条（平台原样）
-    "ts": "2026-11-04T04:00:00+08:00",
+    "platform": "dingtalk",
+    "channel": "cidxxx",            # 哪个会话
+    "sender": "user_staff_id",      # 谁发的
+    "text": "帮我看看那个文件",
+    "attachments": [],
+    "reply_to": "msgxxx",
+    "ts": "2026-11-04T06:00:00+0800",
+    "meta": {"session_webhook": "..."},   # 回消息 / 发文件要用
     "raw": {},                      # 平台原始数据，排查用
 }
 ```
 
-**为什么保留 `raw`：**平台字段千奇百怪，丢了就再也拿不回来。
-出问题的时候，`raw` 是唯一能复现现场的东西。
+**`raw` 和 `meta` 一定要留。**
+
+平台字段千奇百怪而且会变。出问题时这两个是唯一能复现现场的东西。
 
 ---
 
 ## 配置
 
-一份文件管所有平台：
+`~/.atrium/config.json`：
 
 ```json
 {
@@ -186,12 +189,13 @@ atrium/
   "platforms": {
     "feishu": {
       "enabled": true,
-      "app_id": "...",
-      "app_secret": "..."
+      "app_id": "cli_xxx",
+      "app_secret": "xxx"
     },
-    "coze": {
-      "enabled": false,
-      "pat": "sat_..."
+    "dingtalk": {
+      "enabled": true,
+      "client_id": "dingxxx",
+      "client_secret": "xxx"
     }
   }
 }
@@ -199,29 +203,125 @@ atrium/
 
 **只开你要的。**没开的平台完全不加载。
 
+### 用哪套模型
+
+前台 Agent 要模型（判断这是闲聊还是派活）。
+
+配置文件里没有 `front` 段时，**自动借引擎那套**：
+
+```
+%APPDATA%/dsh-bridge/engine.json 里的 active profile
+```
+
+要自己指定就加：
+
+```json
+{
+  "front": {
+    "base_url": "https://api.deepseek.com",
+    "api_key": "sk-xxx",
+    "model": "deepseek-flash"
+  }
+}
+```
+
+---
+
+## 用法
+
+```bash
+python -m atrium.cli init       # 生成配置模板
+python -m atrium.cli test       # 测凭据能不能用
+python -m atrium.cli run        # 启动
+python -m atrium.cli status     # 看队列积压
+```
+
+---
+
+## 推送长什么样
+
+任务跑完不一条条刷屏，攒一批合成一条。
+
+**一个任务（列表）：**
+
+```
+✅ 跑完了：写文档DS
+（模型 DeepSeek，29.4 秒）
+
+文档已生成并核对通过。
+
+产出：测试文档.docx（34KB）
+```
+
+**多个任务（表格，按模型分组）：**
+
+```
+**5 个任务跑完了**：成功 4，失败 1
+
+**DeepSeek**（3 个）
+
+| 任务 | 状态 | 耗时 | 产出 |
+|---|---|---|---|
+| 写文档DS | ✅ | 29s | 测试文档.docx |
+| 查时间DS | ✅ | 7s | — |
+| 算个数DS | ✅ | 2s | — |
+
+**Kimi**（2 个）
+
+| 任务 | 状态 | 耗时 | 产出 |
+|---|---|---|---|
+| 算个数KM | ❌ | 30s | 超时 |
+| 查磁盘KM | ✅ | 18s | — |
+```
+
+然后**文件单独发过去**，手机上能直接下载。
+
+### 为什么要分档
+
+```
+1 个      → 列表（用户想看细节）
+2-20 个   → 表格（用户想横向对比）
+20+ 个    → 只报统计和失败的（再多就是折磨）
+```
+
+### 为什么要按模型分组
+
+同时开 DeepSeek 和 Kimi 的时候，一批推送里混着两边的任务。
+
+不分组的话用户看不出哪个是哪个 —— 而这恰恰最要紧：
+哪个快、哪个慢、哪套老出错。
+
+### 为什么要等一会儿
+
+```
+第一个跑完就报 → 10 个任务会推 10 次
+    ↓
+第一个跑完后再等 8 秒，这期间的全算一批
+    ↓
+一次报完
+```
+
+---
+
+## 只发"这次产出的"文件
+
+工作目录里会攒历史文件。
+
+**按任务开始时间过滤 mtime**：只有任务开始之后改过的文件才算这次的产出。
+
+不然用户派一次活，会收到上周三个旧文档。
+
 ---
 
 ## 跟 remote-dispatch 的关系
 
 ```
-remote-dispatch    引擎（跑任务、带安全层）
-atrium             门（收消息、发消息）
+remote-dispatch    引擎（跑任务、带安全层：守卫 / 影子执行 / 审计 / 回退）
+atrium             门（收消息、前台 Agent、发消息）
     ↓
-atrium 可以单独用
-remote-dispatch 也可以单独用（有自己的 HTTP 接口）
-    ↓
-**两个项目，松耦合**
+两个项目松耦合
+atrium 默认的引擎适配器就是 remote-dispatch
 ```
-
-不过 atrium 默认的引擎适配器就是 remote-dispatch。
-
----
-
-## 状态
-
-**刚开始。**现在只有这个 README 和骨架。
-
-第一个目标：飞书收发跑通。
 
 ---
 

@@ -331,8 +331,16 @@ def build_digest(recs: list[dict]) -> str:
     ok = [r for r in recs if str(r.get("status") or "") == "ok"]
     bad = [r for r in recs if str(r.get("status") or "") != "ok"]
 
-    # ── 1-3 个：逐条说清楚 ──
-    if n <= 3:
+    # ── 1 个：逐条说清楚 ──
+    #
+    # ⚠️ 分档改成"1 个用列表，2 个以上用表格"。
+    #
+    #    原来是 1-3 个都用列表，结果 2 个任务也是列表 ——
+    #    用户的原话：「两个任务现在也变成列表了，不是一个也变成列表了，
+    #    不是表格。A：如果是两个，产出那一格应该放文档」。
+    #
+    #    对：只要不止一个，就该能横向对比，那就得用表格。
+    if n <= 1:
         lines = []
         for r in recs:
             lines.append(_one_task(r, detail=True))
@@ -354,7 +362,7 @@ def build_digest(recs: list[dict]) -> str:
                 lines.append(f"- ……还有 {len(bad) - 10} 个")
         return "\n".join(lines)
 
-    # ── 4-20 个：按模型分组的表格 ──
+    # ── 2-20 个：按模型分组的表格 ──
     #
     # ⚠️ 用表格而不是 bullet 列表。
     #
