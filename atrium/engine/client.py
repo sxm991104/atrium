@@ -166,6 +166,73 @@ class RemoteDispatch(Engine):
                 return [x for x in items if isinstance(x, dict)]
         return []
 
+    # ── 下面三个是 remote-dispatch 特有的 ──
+    #
+    # ⚠️ remote-dispatch 的 dispatch 只写队列，**不会自己跑**。
+    #    必须另外起一个 `bridge.py run --id <id>` 进程。
+    #
+    #    不补这一步的后果（实测 2026-11-04）：
+    #        任务派下去，状态永远 pending，
+    #        25 秒后执行器还在等，最后超时。
+
+    def spawn_worker(self, task_id: str) -> bool:
+        """起一个 worker 去跑这个任务。
+
+        返回 True 表示起起来了。
+        """
+        if not task_id:
+            return False
+
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+
+        # Windows 上别弹黑框
+        flags = 0x08000000 if sys.platform == "win32" else 0
+
+        try:
+            subprocess.Popen(
+                [sys.executable, self.bridge, "run", "--id", task_id],
+                cwd=self.path,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+            return True
+        except OSError as e:
+            print(f"[engine] 起 worker 失败：{e}", file=sys.stderr)
+            return False
+
+    def cancel(self, task_id: str) -> bool:
+        """停一个任务。"""
+        try:
+            r = self._call(["cancel", "--id", task_id], timeout=20)
+        except EngineError:
+            return False
+        return not (isinstance(r, dict) and r.get("status") == "error")
+
+    def live_detail(self, task_id: str) -> dict:
+        """此刻在干什么（只有 remote-dispatch 支持得比较好）。"""
+        try:
+            live = self._call(["live"], timeout=20)
+        except EngineError:
+            return {}
+
+        if not isinstance(live, dict):
+            return {}
+
+        prog = live.get("progress") or {}
+        if isinstance(prog, dict) and prog.get("id") == task_id:
+            return prog
+
+        for t in (live.get("running_tasks") or []):
+            if isinstance(t, dict) and t.get("id") == task_id:
+                return t
+
+        return {}
+
 
 def make_engine(cfg: dict) -> Engine:
     """按配置造一个引擎。"""

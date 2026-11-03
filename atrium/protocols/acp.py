@@ -286,35 +286,179 @@ def m_prompt(params: dict) -> dict:
 
     print(f"[atrium-acp] 开跑：{task[:60]}", file=sys.stderr)
 
-    # ── 跑前台 ──
+    # ── 跑 ──
+    #
+    # ⚠️ 这里默认走**执行器**，不是前台 Agent。
+    #
+    #    因为 ACP 那头（扣子、Zed 之类）**已经有 Agent 了**：
+    #    它负责听懂、判断、决定派不派活 —— 那是它花的钱。
+    #    我们再起一个前台 Agent，等于多烧一份 token，
+    #    而且用户会看到两个 AI 在抢话。
+    #
+    #    所以：上游叫我们干什么，我们就干什么。
+    #    要设 ATM_ACP_MODE=front 才走前台 Agent（调试用）。
+    mode = (os.environ.get("ATM_ACP_MODE") or "executor").strip().lower()
+
+    if mode == "front":
+        try:
+            front = _get_front()
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(file=sys.stderr)
+            _chunk(sid, f"前台起不来：{type(e).__name__}: {e}")
+            return {"stopReason": "refusal"}
+
+        if front is None:
+            _chunk(sid, "前台没配好。检查一下配置文件（~/.atrium/config.json）。")
+            return {"stopReason": "refusal"}
+
+        try:
+            text = front.reply(task)
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc(file=sys.stderr)
+            _chunk(sid, f"前台出错：{type(e).__name__}: {e}")
+            return {"stopReason": "refusal"}
+
+        if sess.cancelled:
+            return {"stopReason": "cancelled"}
+
+        _chunk(sid, text or "（没有输出）")
+        return {"stopReason": "end_turn"}
+
+    return _run_executor(sid, sess, task)
+
+
+def _run_executor(sid: str, sess: Session, task: str) -> dict:
+    """执行器：派给引擎，等结果，回结果。
+
+    ## 为什么不调模型
+
+        上游（扣子的 Agent）已经想过了。
+        它派下来的是**决定**，不是问题。
+
+        我们再来一遍"这是闲聊还是派活"，
+        等于问两遍同一个问题 —— 多花一份钱，还可能得出不同答案。
+
+    ## 怎么区分"要干活"和"就是说了句话"
+
+        **不区分。**
+        上游派下来了，就当要干活。
+
+        如果它只是想说句话，那它根本不该派下来。
+
+        我们唯一要做的是：派下去，把结果拿回来。
+
+    ## ⚠️ 等多久
+
+        引擎跑一个任务可能几十秒到几分钟。
+        这里同步等，因为 ACP 的 prompt 本来就是一轮对话。
+
+        超时设 10 分钟。超过就告诉上游"还在跑"。
+    """
+    import json as _json
+    import threading as _th
+    import time as _t
+
+    engine = _get_engine()
+    if engine is None:
+        _chunk(sid, "引擎没配好。检查一下 ~/.atrium/config.json 的 engine 段。")
+        return {"stopReason": "refusal"}
+
+    # 一、派活
     try:
-        front = _get_front()
+        res = engine.submit(task)
     except Exception as e:  # noqa: BLE001
         traceback.print_exc(file=sys.stderr)
-        _chunk(sid, f"前台起不来：{type(e).__name__}: {e}")
+        _chunk(sid, f"派活失败：{type(e).__name__}: {e}")
         return {"stopReason": "refusal"}
 
-    if front is None:
-        _chunk(sid, "前台没配好。检查一下配置文件（~/.atrium/config.json）。")
-        return {"stopReason": "refusal"}
+    if not res.get("ok"):
+        _chunk(sid, f"派活失败：{res.get('error') or '未知错误'}")
+        return {"stopReason": "end_turn"}
 
-    try:
-        text = front.reply(task)
-    except Exception as e:  # noqa: BLE001
-        traceback.print_exc(file=sys.stderr)
-        _chunk(sid, f"前台出错：{type(e).__name__}: {e}")
-        return {"stopReason": "refusal"}
+    task_id = res.get("id") or ""
+    print(f"[atrium-acp] 派出 {task_id}", file=sys.stderr)
 
-    if sess.cancelled:
-        return {"stopReason": "cancelled"}
+    # 二、起 worker（引擎自己不会跑）
+    starter = getattr(engine, "spawn_worker", None)
+    if callable(starter):
+        try:
+            starter(task_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[atrium-acp] 起 worker 失败：{e}", file=sys.stderr)
 
-    _chunk(sid, text or "（没有输出）")
+    # 三、等结果
+    deadline = _t.time() + 600      # 10 分钟
+    last_status = ""
+    while _t.time() < deadline:
+        if sess.cancelled:
+            return {"stopReason": "cancelled"}
+
+        try:
+            st = engine.poll(task_id)
+        except Exception as e:  # noqa: BLE001
+            print(f"[atrium-acp] 查状态失败：{e}", file=sys.stderr)
+            _t.sleep(2)
+            continue
+
+        status = str(st.get("status") or "")
+        if status != last_status:
+            print(f"[atrium-acp] {task_id}: {status}", file=sys.stderr)
+            last_status = status
+
+        if status in ("ok", "done", "success"):
+            result = str(st.get("result") or "").strip()
+            _chunk(sid, result or "（跑完了，但没有输出）")
+            return {"stopReason": "end_turn"}
+
+        if status in ("error", "failed", "fail"):
+            err = str(st.get("error") or "").strip()
+            _chunk(sid, f"跑失败了：{err or '没有错误信息'}")
+            return {"stopReason": "end_turn"}
+
+        if status in ("cancelled", "canceled"):
+            return {"stopReason": "cancelled"}
+
+        _t.sleep(2)
+
+    # 超时
+    _chunk(
+        sid,
+        f"任务「{task_id}」还在跑（超过 10 分钟），"
+        f"我先不占着这一轮了。你要看结果的话，过会儿再问我。",
+    )
     return {"stopReason": "end_turn"}
+
+
+
 
 
 # ══════════════════════════════════════════════════════
 # 前台实例（懒加载，整个进程一份）
 # ══════════════════════════════════════════════════════
+
+_engine = None
+
+
+def _get_engine():
+    """拿引擎。第一次调用时造，之后复用。"""
+    global _engine
+    if _engine is not None:
+        return _engine
+
+    try:
+        from atrium.core.app import load_config
+        from atrium.engine.client import make_engine
+
+        cfg = load_config()
+        if not cfg:
+            return None
+        _engine = make_engine(cfg.get("engine") or {})
+        return _engine
+    except Exception as e:  # noqa: BLE001
+        print(f"[atrium-acp] 引擎造不出来：{type(e).__name__}: {e}",
+              file=sys.stderr)
+        return None
+
 
 _front = None
 
