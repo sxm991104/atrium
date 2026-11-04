@@ -264,8 +264,28 @@ class Feishu(Platform):
         # 主线程退出时进程会跟着结束。
 
     def health(self) -> dict:
+        """自检：配好了没。
+
+        ⚠️ ready 是说"配置对不对"，不是"连上没有"。
+           正在跑的时候 running=True，但没在跑不代表配错了。
+        """
+        ready = bool(self.app_id and self.app_secret)
+        why = ""
+        if not ready:
+            why = "缺 app_id / app_secret"
+
+        # lark-oapi 是必需的
+        if ready:
+            try:
+                import lark_oapi  # noqa: F401, PLC0415
+            except ImportError:
+                ready = False
+                why = "缺 lark-oapi（pip install lark-oapi）"
+
         return {
             "name": self.name,
+            "ready": ready,
+            "why": why,
             "running": self._running,
             "has_ws": self._ws is not None,
         }

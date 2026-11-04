@@ -135,6 +135,23 @@ class RemoteDispatch(Engine):
         if r.get("status") == "error":
             return {"ok": False, "id": nm, "error": r.get("error") or ""}
 
+        # ⚠️ 被闸门拦下时，status 是 "blocked"，不是 "error"。
+        #
+        #    以前只判 "error"，于是被拦的时候以为派成功了 ——
+        #    前台跟用户说"已经派下去了"，其实任务压根没进队列。
+        #
+        #    实测（2026-11-04）：任务端锁死后派活，
+        #    前台说派出去了，去查是 not-found。
+        if r.get("status") == "blocked":
+            why = (r.get("guard_reason") or r.get("reason")
+                   or r.get("error") or "被安全闸拦下了")
+            return {
+                "ok": False,
+                "id": nm,
+                "error": str(why),
+                "blocked": True,
+            }
+
         return {"ok": True, "id": nm, "error": ""}
 
     def poll(self, name: str) -> dict:

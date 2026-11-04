@@ -520,8 +520,26 @@ class DingTalk(Platform):
         self._running = False
 
     def health(self) -> dict:
+        """自检：配好了没。
+
+        ⚠️ ready 是说"配置对不对"，不是"连上没有"。
+        """
+        ready = bool(self.client_id and self.client_secret)
+        why = ""
+        if not ready:
+            why = "缺 client_id / client_secret"
+
+        if ready:
+            try:
+                import dingtalk_stream  # noqa: F401, PLC0415
+            except ImportError:
+                ready = False
+                why = "缺 dingtalk-stream（pip install dingtalk-stream）"
+
         return {
             "name": self.name,
+            "ready": ready,
+            "why": why,
             "running": self._running,
             "has_client": self._client is not None,
         }

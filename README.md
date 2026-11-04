@@ -135,11 +135,14 @@ atrium/
     agent/
         front.py        前台 Agent（接模型，会调工具）
         prompt.py       派活手册（哪些话能派、任务名怎么起）
-        tools.py        dispatch_task / task_stats / task_list / task_cancel
+        tools.py        工具声明 + 分发（13 个，见下）
+        guard_tools.py  验证码 / 提权 / 解锁那五个
+        extra_tools.py  续话 / 查模型 / 查状态 / 查卡住的问题
         memory.py       对话记忆（记得刚才派了什么）
 
     engine/
-        client.py       引擎适配器（现在接 remote-dispatch）
+        client.py       引擎适配器（走命令行：派活、查进度）
+        api.py          引擎 HTTP 客户端（走 8790：验证码、权限、状态）
 
     platforms/
         base.py         平台接口
@@ -234,6 +237,67 @@ python -m atrium.cli init       # 生成配置模板
 python -m atrium.cli test       # 测凭据能不能用
 python -m atrium.cli run        # 启动
 python -m atrium.cli status     # 看队列积压
+```
+
+---
+
+## 前台能干哪些事
+
+**前台是个 Agent，靠工具干活。一共 13 个：**
+
+| 工具 | 干什么 | 走哪条路 |
+|---|---|---|
+| `dispatch_task` | 派活 | 命令行 |
+| `task_stats` | 查一个任务的进度 | 命令行 |
+| `task_list` | 列所有任务窗口 | 命令行 |
+| `task_cancel` | 停一个任务 | 命令行 |
+| `confirm_dangerous_action` | 危险操作三级确认（第 3 级发码） | HTTP |
+| `verify_task_code` | 校验用户报的验证码（针对某一件活） | HTTP |
+| `unlock_all` | 解锁整个任务端 | HTTP |
+| `task_permission` | 查 / 改某个窗口的权限档 | HTTP |
+| `guard_status` | 验证码那块配好没有 | HTTP |
+| `continue_task` | 往已有窗口续话（**「继续」必须用它**） | HTTP |
+| `list_models` | 有哪些模型可用（**别让模型瞎猜名字**） | HTTP |
+| `check_asks` | 有哪些任务卡在等用户回答 | HTTP |
+| `engine_status` | 任务端整体状态（锁没锁） | HTTP |
+
+### 为什么分两条路
+
+```
+命令行（core/bridge.py dispatch / stats / list / cancel）
+    · 一次性动作，不依赖那个服务在跑
+    · 引擎挂了它也能派活（因为它就是起进程）
+
+HTTP（127.0.0.1:8790）
+    · 验证码 / 权限 / 状态这些**有状态**的东西
+    · 状态在引擎进程里，命令行没暴露
+    · 需要桌面端起起来（它才是那个服务）
+```
+
+**⚠️ 服务没起来时，那 9 个 HTTP 工具会明确说"桌面端没起"，**
+**而不是报一堆 urllib 的错。**
+
+### 「继续」为什么必须用 continue_task
+
+```
+用户说「继续」，如果重派一个新任务：
+    · 会被当成又开一件新活
+    · 可能又触发一遍成本检查、又弹一遍同一个问题
+    · 来回打转 —— 实测卡死过整条链路
+
+continue_task 做的是：把这句话送进**原来那个窗口**，让上下文接着走。
+```
+
+### 验证码有两种，别搞混
+
+```
+verify_task_code   验的是「某一件具体的活」
+                   用户说「那个登录页的码我收到了」
+
+unlock_all         解的是「整个任务端锁死」
+                   用户说「现在什么都做不了」
+
+拿错会验不过 —— 那不是码错，是类型错。
 ```
 
 ---

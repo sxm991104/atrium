@@ -93,14 +93,33 @@ def cmd_status() -> int:
 
 
 def cmd_test() -> int:
+    """测配置能不能用。
+
+    ## ⚠️ 这一块原来只认飞书的 _get_token
+
+        飞书后来改用 lark-oapi（SDK 自己管 token，
+        我们不碰），结果这里调 _get_token 直接 AttributeError。
+
+        钉钉更惨 —— 压根没测，那一节是空的。
+
+    ## 现在怎么做
+
+        **不猜每个平台内部怎么实现的**，只调它自己的 health()。
+
+        每个平台实现自己的 health()，说清楚"我配好了没"。
+        cli 不认识任何具体平台 —— 加新平台不用改这里。
+
+        （这跟 platforms/registry.py 是一个思路：
+          主程序不该知道具体平台的内部结构。）
+    """
     cfg = load_config()
     if not cfg:
-        print("  没有配置。")
+        print("  没有配置。先跑 init。")
         return 1
 
     ok_all = True
 
-    # 引擎
+    # ── 引擎 ──
     print("=" * 60)
     print("  引擎")
     print("=" * 60)
@@ -114,7 +133,12 @@ def cmd_test() -> int:
         print(f"  ❌ {type(e).__name__}: {e}")
         ok_all = False
 
-    # 各平台
+    # ── 各平台 ──
+    #
+    # ⚠️ 这里不走 registry.make_platform —— 那个会连平台。
+    #    test 只想知道"配得对不对"，不该真的建立长连接。
+    from atrium.platforms import registry
+
     for name, pcfg in (cfg.get("platforms") or {}).items():
         if not pcfg.get("enabled"):
             continue
@@ -124,27 +148,39 @@ def cmd_test() -> int:
         print(f"  平台：{name}")
         print("=" * 60)
 
-        if name == "feishu":
-            try:
-                from atrium.platforms.feishu import Feishu
+        p = registry.make_platform(name, pcfg)
+        if p is None:
+            print(f"  ❌ 没有这个平台（已支持：{', '.join(registry.names())}）")
+            ok_all = False
+            continue
 
-                f = Feishu(
-                    pcfg.get("app_id") or "",
-                    pcfg.get("app_secret") or "",
-                    verify_ssl=bool(pcfg.get("verify_ssl", True)),
-                )
-                tok = f._get_token()
-                print(f"  ✅ 换到 token（{len(tok)} 字符）")
-            except Exception as e:  # noqa: BLE001
-                print(f"  ❌ {type(e).__name__}: {e}")
-                ok_all = False
+        try:
+            h = p.health() or {}
+        except Exception as e:  # noqa: BLE001
+            print(f"  ❌ health() 出错：{type(e).__name__}: {e}")
+            ok_all = False
+            continue
+
+        # 平台自己说配好没
+        ready = h.get("ready")
+        why = str(h.get("why") or "").strip()
+
+        if ready is None:
+            # 老平台没实现 ready，只说"构造成功了"
+            print("  ✅ 配置能读进来（这个平台没有自检）")
+        elif ready:
+            print("  ✅ 配置正常")
+            if why:
+                print(f"     {why}")
+        else:
+            print(f"  ❌ {why or '配置不完整'}")
+            ok_all = False
 
     print()
     print("=" * 60)
     print(f"  {'✅ 都通了' if ok_all else '❌ 有没通的'}")
     print("=" * 60)
     return 0 if ok_all else 1
-
 
 def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else ""

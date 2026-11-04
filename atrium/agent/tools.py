@@ -125,6 +125,211 @@ TOOL_SPECS = [
             },
         },
     },
+    # ── 下面是验证码 / 提权 / 解锁 ──
+    #
+    # ⚠️ 下面五个是拆分支那会儿漏掉的。
+    #
+    #    手册（prompt.py）里写着"提权要验证码、你不是发码的人"，
+    #    但工具清单只有上面四个，前台根本没有收码的手段 ——
+    #    手册会说，手上没有。
+    #
+    #    实测（2026-11-04）：老爸翻 front.py 发现了这个缺口。
+    #
+    #    还有一个更隐蔽的：**发码本身**也没有工具。
+    #    用户碰到权限墙，引擎只回"你被拦了"，
+    #    没有任何人去发那个码 —— 用户永远收不到。
+    #    所以补了 confirm_dangerous_action（三级确认，第 3 级才发码）。
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm_dangerous_action",
+            "description": (
+                "危险操作的三级确认。**第 3 级才真的发验证码到用户邮箱。**\n"
+                "第 1 次提醒（level=1）、第 2 次警告（level=2）、"
+                "第 3 次发码（level=3）。\n"
+                "用户说了危险操作（删库、格式化、往系统目录写东西）时用这个。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "用户要做的危险操作，用他的原话",
+                    },
+                    "level": {
+                        "type": "integer",
+                        "description": (
+                            "第几次。1=提醒（不发码），2=警告（不发码），"
+                            "3=发验证码"
+                        ),
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "description": "为什么要做这个（可选）",
+                    },
+                },
+                "required": ["task", "level"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_task_code",
+            "description": (
+                "把用户报过来的验证码交给引擎校验（针对**某一件具体的活**）。"
+                "用户说「邮箱里收到码了」「码是 123456」时用这个。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "哪个窗口要验证（任务名）",
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "用户报的验证码",
+                    },
+                },
+                "required": ["task", "code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "unlock_all",
+            "description": (
+                "解锁**整个任务端**（不针对哪件活）。"
+                "用户说「整个电脑锁死了」「什么都做不了了」时用这个。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "用户报的验证码",
+                    },
+                },
+                "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_permission",
+            "description": (
+                "查或改某个窗口的权限档。"
+                "用户说「让它能碰桌面」「这个任务权限太小」时用这个。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "窗口名。留空 = 列出所有窗口的权限",
+                    },
+                    "level": {
+                        "type": "string",
+                        "description": (
+                            "workspace（只能动任务目录）/ "
+                            "home（能动用户目录）/ full（全部）。"
+                            "留空 = 只查不改"
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "guard_status",
+            "description": (
+                "看验证码那块配好没有。"
+                "用户说「码没收到」「验证码是不是坏了」时先看这个。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    # ── 续话 / 查模型 / 查状态 ──
+    #
+    # ⚠️ 这三个也是拆分支时漏的。
+    #
+    #    continue_task 尤其要紧：
+    #    用户说「继续」时如果重派新任务，
+    #    会被当成又开一件新活，来回打转，实测卡死过整条链路。
+    {
+        "type": "function",
+        "function": {
+            "name": "continue_task",
+            "description": (
+                "往一个已有的任务窗口里接着说一句话，**不新开窗口**。\n"
+                "用户说「继续」「接着做」「再改一下」时用这个，"
+                "**不要重新 dispatch_task**。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "往哪个任务窗口里说",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "要说的这句话。可以很短，比如「继续」",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_models",
+            "description": (
+                "看有哪些模型可用、名字叫什么。"
+                "**派活前想指定模型时先调这个**，别瞎猜名字。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_asks",
+            "description": (
+                "看电脑端卡住时推回来的问题。\n"
+                "任务状态一直是 running 但没进展、"
+                "或者用户问「它怎么不动了」时用这个。\n"
+                "跟 engine_status 的区别：那个看整机状态，"
+                "这个看「有哪些任务在等用户回答」。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多看几条，默认 5",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "engine_status",
+            "description": (
+                "看任务端整体状态（锁没锁、服务起没起）。"
+                "用户问「现在能派吗」「为什么派不出去」「是不是卡住了」时先调这个。"
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
 ]
 
 
@@ -184,7 +389,24 @@ def dispatch_task(engine: Engine, task: str = "", task_name: str = "",
         return f"派活失败：{e}"
 
     if not res.get("ok"):
-        return f"派活失败：{res.get('error') or '未知错误'}"
+        err = str(res.get("error") or "未知错误")
+
+        # ⚠️ 被安全闸拦下的，不是普通失败。
+        #
+        #    要告诉前台**下一步该干什么** ——
+        #    让用户去邮箱拿码，前台调 unlock_all 提交。
+        #
+        #    只说"派活失败"的话，前台会以为系统坏了，
+        #    或者傻等着，不知道该怎么办。
+        if res.get("blocked"):
+            return (
+                "派不出去 —— 被安全闸拦住了：\n"
+                f"{err}\n\n"
+                "接下来：让用户去邮箱拿验证码，拿到之后告诉我，\n"
+                "我用 unlock_all 提交。"
+            )
+
+        return f"派活失败：{err}"
 
     task_id = res.get("id") or name or ""
 
@@ -496,5 +718,76 @@ def execute(engine: Engine, name: str, args: dict) -> str:
         return task_list(engine, n)
     if name == "task_cancel":
         return task_cancel(engine, args.get("name") or "")
+
+    # ── 续话 / 查模型 / 查状态 ──
+    #
+    # ⚠️ 这三个也走 HTTP，不走命令行：
+    #    continue 要调 /api/continue（命令行没有这个命令），
+    #    模型配置和状态只有桌面端那个服务知道。
+    if name in ("continue_task", "list_models", "engine_status", "check_asks"):
+        try:
+            from atrium.agent import extra_tools as _et
+        except ImportError as e:
+            return f"工具载不进来：{e}"
+
+        if name == "continue_task":
+            return _et.continue_task(
+                args.get("name") or "",
+                args.get("message") or "",
+            )
+        if name == "list_models":
+            return _et.list_models()
+        if name == "check_asks":
+            try:
+                n = int(args.get("limit") or 5)
+            except (TypeError, ValueError):
+                n = 5
+            return _et.check_asks(n)
+        return _et.engine_status()
+
+    # ── 验证码 / 提权 / 解锁 ──
+    #
+    # ⚠️ 这几个不走 engine 参数 —— 它们走 HTTP（见 guard_tools.py）。
+    #
+    #    因为状态在引擎进程里（出码、校验、放行的流程），
+    #    命令行那边没暴露这些接口。
+    if name in ("confirm_dangerous_action", "verify_task_code",
+                "unlock_all", "task_permission", "guard_status"):
+        try:
+            from atrium.agent import guard_tools as _gt
+        except ImportError as e:
+            return f"验证码工具载不进来：{e}"
+
+        if name == "confirm_dangerous_action":
+            try:
+                lv = int(args.get("level") or 1)
+            except (TypeError, ValueError):
+                lv = 1
+            return _gt.confirm_dangerous_action(
+                args.get("task") or "",
+                lv,
+                args.get("purpose") or "",
+            )
+        if name == "verify_task_code":
+            return _gt.verify_task_code(
+                args.get("task") or "",
+                args.get("code") or "",
+            )
+        if name == "unlock_all":
+            return _gt.unlock_all(args.get("code") or "")
+        if name == "task_permission":
+            return _gt.task_permission(
+                args.get("name") or "",
+                args.get("level") or "",
+                # ⚠️ 第三个参数是验证码。
+                #    漏传它 → 升权永远验不过：
+                #    用户明明报了码，引擎还是回"要验证码"。
+                #
+                #    实测（2026-11-04）：就是漏了这个，
+                #    端到端测升权一直失败。
+                args.get("code") or "",
+            )
+        if name == "guard_status":
+            return _gt.guard_status()
 
     return f"没有这个工具：{name}"
