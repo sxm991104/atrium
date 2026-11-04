@@ -120,6 +120,15 @@ class Atrium:
             except Exception as e:  # noqa: BLE001
                 print(f"[atrium] 监工起不来：{e}", file=sys.stderr)
 
+        # 心跳：让看门狗知道我们还活着
+        self.beat = None
+        try:
+            from atrium.core.beat import Beat  # noqa: PLC0415
+
+            self.beat = Beat()
+        except Exception:  # noqa: BLE001
+            pass
+
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -269,6 +278,10 @@ class Atrium:
             self.watch.start()
             print("[atrium] 进度监工已启动", flush=True)
 
+        # 心跳
+        if self.beat is not None:
+            self.beat.start()
+
     def _run_platform(self, p: Platform) -> None:
         """跑一个平台的接收循环。"""
         def on_msg(msg: Message) -> None:
@@ -291,6 +304,11 @@ class Atrium:
         if self.watch is not None:
             try:
                 self.watch.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        if self.beat is not None:
+            try:
+                self.beat.stop()
             except Exception:  # noqa: BLE001
                 pass
         for p in self.platforms.values():
