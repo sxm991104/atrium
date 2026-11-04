@@ -1,2 +1,0 @@
-2026-11-04 08:15:44,527 dingtalk_stream.client INFO     open connection, url=https://api.dingtalk.com/v1.0/gateway/connections/open [stream.py:149]
-2026-11-04 08:15:45,336 dingtalk_stream.client INFO     endpoint is {'endpoint': 'wss://wss-open-connection-union.dingtalk.com:443/connect', 'ticket': 'e1e66d3f-d7e4-11f1-bccb-76594f2dbf4a'} [stream.py:71]

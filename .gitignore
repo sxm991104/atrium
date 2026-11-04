@@ -10,3 +10,6 @@ _tmp/
 atrium.log
 atrium.err.log
 _reply_dump.log
+a.log
+a.err
+*.err
