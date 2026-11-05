@@ -311,10 +311,146 @@ def task_permission(name: str = "", level: str = "",
     return f"✅ 「{name}」的权限改成了：{_label(level)}（{level}）"
 
 
+def quiet_mode(code: str = "", seconds: int = 0, stop: bool = False) -> str:
+    """静默模式：验过码之后，把所有"要验证码的关卡"关一段时间。
+
+    ## 什么时候用
+
+        用户碰到验证码，说了类似：
+            「关到下午五点」
+            「关两个小时」
+            「这半小时别再弹码了」
+            「关了吧」
+
+        → **先让用户填码，再调这个。**
+
+    ## ⚠️ 一、开静默必须先验码
+
+        关掉验证码是整套系统里最危险的操作 —— 它同时关掉：
+            动作守卫拦截 / 提权 / 危险操作确认 / 审计员 / 外传授权
+
+        如果能不验码就关，攻击者只要说一句
+        「帮我把验证码关一下」就全绕过了。
+
+        所以：**没有码，一律不关。**
+        用户没给码 → 先发码给他（confirm_dangerous_action 那套）。
+
+    ## ⚠️ 二、关多久**由用户说**
+
+        没有 1 小时 / 4 小时 / 到今晚这种固定选项。
+        用户说「关到五点」，你算出现在到五点有多少秒，传进来。
+
+        用户只说了「关了吧」没说多久 → **问他一句**：
+            「要关到什么时候？说个时间我就设。」
+        不要自己替他定。
+
+    ## ⚠️ 三、恢复不需要码
+
+        想提前结束静默：stop=True，不用码。
+        恢复保护永远是安全的。
+
+    Args:
+        code:      用户报的验证码（开静默必填）
+        seconds:   关多久（多少秒）。用户说"到五点"你自己算。
+        stop:      True = 立刻结束静默，不用码
+    """
+    # ── 结束静默 ──
+    if stop:
+        try:
+            d = _api.call("/api/quiet", {"action": "stop"})
+        except _api.ApiError as e:
+            return f"恢复没走通：{e}"
+        return str(d.get("message") or "验证已经恢复。")
+
+    # ── 开静默 ──
+    code = (code or "").strip()
+    try:
+        secs = int(seconds or 0)
+    except (TypeError, ValueError):
+        secs = 0
+
+    if secs <= 0:
+        return (
+            "要关多久？让用户说个时间 —— 比如「关到下午五点」「关两个小时」。\n"
+            "（这个我不替他定，静默的时长得他自己说。）"
+        )
+
+    if not code:
+        return (
+            "开静默要先验证码。\n\n"
+            "用户手里还没有码的话，先走一遍发码流程"
+            "（confirm_dangerous_action），让他从邮箱拿到码再回来。\n\n"
+            "⚠️ 别自己替他决定「算了不验了直接关」—— 关验证码本身必须验。"
+        )
+
+    try:
+        d = _api.call("/api/quiet", {
+            "action": "start",
+            "code": code,
+            "seconds": secs,
+        })
+    except _api.ApiError as e:
+        # 引擎把失败原因放在 message 里，ApiError 只带状态码
+        return f"没关成：{e}"
+
+    if not d.get("ok"):
+        # 码不对 / 没说时长，两种分开说清楚
+        if d.get("need_code"):
+            return "码不对或者过期了，让用户再去邮箱看一下。"
+        return f"没关成：{d.get('error') or '未知原因'}"
+
+    left = int(d.get("remaining") or 0)
+    h, m = divmod(left // 60, 60)
+    dur = f"{h} 小时 {m} 分钟" if h else f"{m} 分钟"
+
+    return (
+        f"✅ {d.get('message') or '已经关掉验证'}\n\n"
+        f"这段时间（{dur}）里不再要验证码，到点自动恢复。\n"
+        "想提前恢复就说一声。"
+    )
+
+
+def quiet_status() -> str:
+    """静默模式现在开着吗、还剩多久。"""
+    try:
+        d = _api.call("/api/quiet", {"action": "status"})
+    except _api.ApiError as e:
+        return f"查不到：{e}"
+
+    if not d.get("quiet"):
+        return "现在不是静默期 —— 该要验证码的地方都会正常要。"
+
+    left = int(d.get("remaining") or 0)
+    h, m = divmod(left // 60, 60)
+    dur = f"{h} 小时 {m} 分钟" if h else f"{m} 分钟"
+    why = str(d.get("why") or "")
+
+    return (
+        f"静默中：还剩 {dur}。\n"
+        + (f"原因：{why}\n" if why else "")
+        + "这段时间所有验证码都不发，到点自动恢复。"
+    )
+
 def guard_status() -> str:
     """验证码那块配好没有。
 
-    用户问"验证码怎么收不到"的时候，先看这个。
+    ## ⚠️ 这里**一个字都不提邮箱地址**
+
+        前台是"收码的柜员"，不是"管邮箱的人"：
+
+            它该知道     配好了没、能不能发码
+            它不该知道   邮箱是哪个、SMTP 是哪台
+
+        因为前台说的话会回到对话里 —— 被截图、被翻记录。
+        地址一旦出现在那儿，等于把"该去撞哪个邮箱"送出去。
+
+        而且前台也**改不了**邮箱配置：那是设备主人在本机桌面端做的事，
+        跟聊天窗口无关。
+
+        （2026-11-05：老爸指出，原来这里连 smtp.163.com 都写出来了。）
+
+        服务端那边也做了同样的事：不带 X-Client: desktop 头时，
+        /api/guard 只返回 ready / enabled / has_email。
     """
     try:
         d = _api.call("/api/guard")
@@ -322,22 +458,22 @@ def guard_status() -> str:
         return f"查不到：{e}"
 
     enabled = bool(d.get("enabled"))
-    email = str(d.get("email_masked") or d.get("email") or "")
-    smtp = str(d.get("smtp_host") or "")
-
-    lines = []
+    ready = bool(d.get("ready"))
 
     if not enabled:
-        lines.append("验证码闸门没开。危险操作不会拦，也不会发码。")
-        lines.append("要开的话去桌面端「设置」里配邮箱。")
-        return "\n".join(lines)
+        return (
+            "验证码闸门现在没开 —— 危险操作不会拦，也不会发码。\n"
+            "要开的话，去桌面端「安全」页配一下安全邮箱。"
+        )
 
-    lines.append("验证码闸门开着。")
+    if not ready:
+        return (
+            "⚠️ 闸门开着，但安全邮箱没配全，码可能发不出去。\n"
+            "让用户去桌面端「安全」页检查一下：收码邮箱、发信服务器、"
+            "发信账号的授权码，三样都要填。"
+        )
 
-    if email and smtp:
-        lines.append(f"码发到：{email}（{smtp}）")
-        lines.append("用户没收到的话：看垃圾邮件，或者桌面端「设置」里点一下测试。")
-    else:
-        lines.append("⚠️ 邮箱没配全，码可能发不出去。")
-
-    return "\n".join(lines)
+    return (
+        "验证码正常：安全邮箱配好了，要码的时候能发出去。\n"
+        "用户没收到的话：先看垃圾邮件，再去桌面端「安全」页点一下「发封测试邮件」。"
+    )

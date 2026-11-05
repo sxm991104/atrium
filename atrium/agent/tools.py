@@ -254,6 +254,51 @@ TOOL_SPECS = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    # ── 静默模式 ──
+    #
+    # ⚠️ 这是"验过码之后把验证关卡关一段时间"，不是"不验就关"。
+    #    关掉的东西包括：动作守卫 / 提权 / 危险操作 / 审计员 / 外传。
+    #    所以开它本身必须先验码 —— 见 quiet_mode 的 docstring。
+    {
+        "type": "function",
+        "function": {
+            "name": "quiet_mode",
+            "description": (
+                "静默模式：验过码之后，把所有要验证码的关卡"
+                "（动作守卫、提权、危险操作、审计员、外传）关一段时间。\n"
+                "用户说「关到下午五点」「关两个小时」「别再弹码了」时用。\n"
+                "⚠️ 开静默**必须先验码**；关多久**由用户说**，不要自己定。\n"
+                "⚠️ 用户只说了「关了吧」没说多久 → 先问他要关到什么时候。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "用户报的验证码（开静默必填）",
+                    },
+                    "seconds": {
+                        "type": "integer",
+                        "description": (
+                            "关多久（秒）。用户说「到下午五点」你自己算出现在到那时多少秒"
+                        ),
+                    },
+                    "stop": {
+                        "type": "boolean",
+                        "description": "True = 立刻结束静默（这个不用码）",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "quiet_status",
+            "description": "静默模式现在开着吗、还剩多久。",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
     # ── 续话 / 查模型 / 查状态 ──
     #
     # ⚠️ 这三个也是拆分支时漏的。
@@ -328,6 +373,58 @@ TOOL_SPECS = [
                 "用户问「现在能派吗」「为什么派不出去」「是不是卡住了」时先调这个。"
             ),
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    # ── 安全模式 ──
+    #
+    # ⚠️ 为什么前台要有这个工具
+    #
+    #    「出事可回退」这个模式要开系统卷影副本保护 ——
+    #    而远程办公时用户不在电脑前，没法点桌面端的按钮。
+    #
+    #    但前台是暴露在外的：消息可能来自飞书/钉钉，
+    #    可能是别人借手机发的。所以这个工具比桌面端严得多：
+    #        · **一律要验证码**（不填先发一封到他邮箱）
+    #        · **只能往保护多的方向切，不能往少的方向切**
+    #
+    #    （2026-11-05 老爸定的：
+    #       「要那个码，到前台了都要码宝贝，
+    #         因为前台是暴露在外的，桌面端是用户电脑。」
+    #       「前台只能去开，不能关。」）
+    {
+        "type": "function",
+        "function": {
+            "name": "security_mode",
+            "description": (
+                "查看或切换安全模式。\n"
+                "用户说「保护严格点」「开回退」「换个安全模式」时用这个。\n"
+                "\n"
+                "⚠️ 规矩：\n"
+                "  · 留空 mode = 只查当前模式和哪些能切\n"
+                "  · 要切 **一律要验证码** —— 不填 code 会先发一封到他邮箱，\n"
+                "    然后你把「码发到邮箱了，告诉我」回给用户\n"
+                "  · **只能往保护多的方向切，不能往少的方向切** ——\n"
+                "    想变松的话只能让他自己在电脑上点，你不能代劳"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "description": (
+                            "strict（严格防护）/ both（全开）/ rollback（出事可回退）。"
+                            "留空 = 只查不改"
+                        ),
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": (
+                            "用户报过来的验证码。"
+                            "第一次调不要填（会发码），用户报了码再填上重调一次"
+                        ),
+                    },
+                },
+            },
         },
     },
 ]
@@ -574,10 +671,28 @@ def task_stats(engine: Engine, name: str = "") -> str:
     if not name:
         return "要查哪个任务？告诉我名字。"
 
+    # ⚠️ 先查 engine 是不是 None。
+    #
+    #    实测（2026-11-05）：engine=None 时直接
+    #        AttributeError: 'NoneType' object has no attribute 'poll'
+    #    用户看到的是「执行出错：AttributeError...」——
+    #    他不知道这是"引擎没接上"。
+    #
+    #    这种情况发生在：单独调工具（测试、脚本）、
+    #    或者引擎构造失败但前台还在跑。
+    if engine is None:
+        return (
+            "现在没接上任务端 —— 查不了进度。\n"
+            "去桌面端看一眼「诊断」页，或者稍等它重连。"
+        )
+
     try:
         r = engine.poll(name)
     except EngineError as e:
         return f"查不到：{e}"
+    except AttributeError as e:
+        # 引擎对象在，但没有 poll（换了实现、或者没接对）
+        return f"这个引擎不支持查进度（{e}）。"
 
     if not isinstance(r, dict):
         return f"查不到「{name}」的状态。"
@@ -752,7 +867,8 @@ def execute(engine: Engine, name: str, args: dict) -> str:
     #    因为状态在引擎进程里（出码、校验、放行的流程），
     #    命令行那边没暴露这些接口。
     if name in ("confirm_dangerous_action", "verify_task_code",
-                "unlock_all", "task_permission", "guard_status"):
+                "unlock_all", "task_permission", "guard_status",
+                "quiet_mode", "quiet_status"):
         try:
             from atrium.agent import guard_tools as _gt
         except ImportError as e:
@@ -789,5 +905,23 @@ def execute(engine: Engine, name: str, args: dict) -> str:
             )
         if name == "guard_status":
             return _gt.guard_status()
+
+    # ── 安全模式 ──
+    #
+    # ⚠️ 也走 HTTP，而且是走**要码那条路**（/api/security/mode/verified）。
+    #
+    #    桌面端用的是不要码的 /api/security/mode ——
+    #    用户坐在电脑前，自己看着屏幕点。
+    #    前台不一样，一刀切要码。
+    #    （2026-11-05 老爸定的：「到前台了都要码」。）
+    if name == "security_mode":
+        try:
+            from atrium.agent import security_tools as _st
+        except ImportError as e:
+            return f"安全模式工具载不进来：{e}"
+        return _st.set_security_mode(
+            args.get("mode") or "",
+            args.get("code") or "",
+        )
 
     return f"没有这个工具：{name}"

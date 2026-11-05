@@ -272,6 +272,11 @@ def collect_files(recs: list[dict]) -> list[str]:
         out.append(p)
 
     for r in recs:
+        # ⚠️ 只处理字典（跟 build_digest 里同样的理由）。
+        #    实测（2026-11-05）：传字符串进来直接崩在 r.get()。
+        if not isinstance(r, dict):
+            continue
+
         since = _task_start_time(r)
 
         # ── 一、扫任务自己的工作目录 ──
@@ -324,6 +329,23 @@ def build_digest(recs: list[dict]) -> str:
 
         这条是踩出来的，不是想出来的。
     """
+    n = len(recs)
+    if n == 0:
+        return ""
+
+    # ⚠️ 只留字典。
+    #
+    #    实测（2026-11-05）：传一个字符串进来直接崩在
+    #        AttributeError: 'str' object has no attribute 'get'
+    #    整个摘要就没了 —— 用户一条汇报都收不到。
+    #
+    #    理论上调用方传的都是数据库记录（一定是字典），
+    #    但"理论上"不值钱：坏掉的 JSONL 行、别的调用方传错、
+    #    以后重构改了数据结构 —— 任何一种都会让这里崩。
+    #
+    #    过滤掉非字典的代价是"少报一条奇怪的记录"，
+    #    不处理的代价是"一条都不报"。
+    recs = [r for r in recs if isinstance(r, dict)]
     n = len(recs)
     if n == 0:
         return ""
