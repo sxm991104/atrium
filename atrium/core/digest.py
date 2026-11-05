@@ -488,4 +488,29 @@ def _one_task(r: dict, detail: bool = True) -> str:
         lines.append("")
         lines.append("产出：" + " ".join(files))
 
+    # ── 外传拦截命中 ──
+    #
+    # 引擎在推送前扫过一遍：这次要送回去的内容里，
+    # 有没有别人的邮箱 / 网盘链接 / 上传命令。
+    #
+    # ⚠️ 命中不等于"有问题"，也不等于"已经拦下"。
+    #    我们**不删内容**，只把这件事说出来，
+    #    让用户自己判断要不要发。
+    #
+    #    这个字段是引擎塞进 outbox 的（core/bridge.py 的 _scan_exfil），
+    #    那一档没开外传拦截的话这里就是空的。
+    hits = r.get("exfil") or []
+    if isinstance(hits, list) and hits:
+        lines.append("")
+        lines.append(f"⚠️ 这次要送回来的内容里，有 {len(hits)} 处像是往外的：")
+        for h in hits[:5]:
+            if not isinstance(h, dict):
+                continue
+            what = str(h.get("hit") or "").strip()
+            why = str(h.get("why") or "").strip()
+            if what:
+                lines.append(f"  · {what}")
+            if why:
+                lines.append(f"    {why}")
+
     return "\n".join(lines)
