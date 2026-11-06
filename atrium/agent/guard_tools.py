@@ -375,14 +375,14 @@ def quiet_mode(code: str = "", seconds: int = 0, stop: bool = False) -> str:
             "（这个我不替他定，静默的时长得他自己说。）"
         )
 
-    if not code:
-        return (
-            "开静默要先验证码。\n\n"
-            "用户手里还没有码的话，先走一遍发码流程"
-            "（confirm_dangerous_action），让他从邮箱拿到码再回来。\n\n"
-            "⚠️ 别自己替他决定「算了不验了直接关」—— 关验证码本身必须验。"
-        )
-
+    # ⚠️ 不带码也照样调接口 —— **接口负责发码**。
+    #
+    #    原来这里判断"没码就直接返回一段话"，让前台去走别的发码流程。
+    #    但前台根本没有"发码"这个工具，用户也就永远拿不到码 ——
+    #    死循环。
+    #
+    #    现在：调过去，服务端发现没码 → 发一封 → 回 need_code。
+    #    前台把"码发到你邮箱了"告诉用户就行。
     try:
         d = _api.call("/api/quiet", {
             "action": "start",
@@ -394,9 +394,20 @@ def quiet_mode(code: str = "", seconds: int = 0, stop: bool = False) -> str:
         return f"没关成：{e}"
 
     if not d.get("ok"):
-        # 码不对 / 没说时长，两种分开说清楚
+        # 三种要分开说：
+        #   没给码       → 码刚发出去，让他去拿
+        #   码不对/过期  → 让他再要一封（下次调用自动重发）
+        #   别的         → 原样说出来
         if d.get("need_code"):
-            return "码不对或者过期了，让用户再去邮箱看一下。"
+            if not code:
+                return (
+                    f"验证码已经发到你邮箱了（关 {secs // 60} 分钟的那封）。\n"
+                    "拿到之后告诉我，我把码填进去。"
+                )
+            return (
+                "码不对，或者过期了。\n"
+                "再试一次我会重发一封 —— 你跟我要，我这就去要。"
+            )
         return f"没关成：{d.get('error') or '未知原因'}"
 
     left = int(d.get("remaining") or 0)

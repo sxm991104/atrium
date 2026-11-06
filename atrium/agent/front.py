@@ -180,11 +180,30 @@ class FrontAgent:
         messages: list[dict] = [{"role": "system", "content": system}]
 
         # 历史（可选）—— 只在同一次会话里用
-        for h in (history or []):
+        hist = history or []
+        for h in hist:
             role = h.get("role")
             content = h.get("content")
             if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
+
+        # ⚠️ 第一次跟这个人说话 —— 告诉模型，让它顺口提一句"你能改哪些配置"。
+        #
+        #    为什么在这里判、不让模型自己看：
+        #        历史为空 = 第一次。但模型看不到"历史有几条"，
+        #        它只看到对话内容。所以这层判断得在外面做。
+        #
+        # ⚠️ 只在第一次加，别每轮都加。
+        #    每次都念一遍很烦 —— 用户会关掉这个助手。
+        if not hist:
+            task = (
+                "【第一次对话】\n"
+                "（这个联系人第一次跟你说话。答完正事之后，"
+                "顺口提一句：他在外面也能改配置，改之前要邮箱验证码，"
+                "想看清单就问「你能改哪些配置」。只说一次，别啰嗦。）\n"
+                "\n"
+                + task
+            )
 
         messages.append({"role": "user", "content": task})
 
